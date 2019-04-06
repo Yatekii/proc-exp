@@ -1,0 +1,13 @@
+[package]
+name = "proc-exp"
+version = "0.1.0"
+authors = ["Noah Huesser <yatekii@yatekii.ch>"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "*"
+syn = { version = "*", features = ["full"] }
+proc-macro2 = "*"
