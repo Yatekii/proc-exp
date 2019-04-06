@@ -1,4 +1,4 @@
-use syn::LitInt;
+use syn::parse::Parse;
 use proc_macro2::TokenTree::{
     Ident,
     Group,
@@ -14,33 +14,35 @@ use proc_macro2::{
     token_stream::IntoIter,
 };
 
+use syn::parse::ParseStream;
+
 #[proc_macro]
 pub fn frame(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = proc_macro2::TokenStream::from(input);
 
     // println!("{:#?}", input);
 
-    let mut tokens = input.into_iter();
+    let tokens = input.into_iter();
 
-    let (decodeable_name, mut tokens) = get_struct_identifier(tokens);
+    let (decodeable_name, tokens) = get_struct_identifier(tokens);
 
-    let mut field_names = vec![];
-    let mut fields = vec![];
+    // let mut field_names = vec![];
+    // let mut fields = vec![];
 
-    loop {
-        let (field, _tokens) = get_field(tokens);
-        tokens = _tokens;
+    let fields_meta: Struct = syn::parse2(tokens.clone()).unwrap();
+    println!("{:#?}", fields_meta);
 
-        fields.push(field);
-        field_names = fields.iter().map(|f| f.field_name.clone()).collect::<Vec<_>>();
-    }
+    let fields = fields_meta.fields.iter().map(|f| {
+        let name = &f.name;
+        let typ = &f.typ;
+        quote!{
+            pub #name: #typ
+        }
+    });
 
-    println!("{:?}", fields);
-
-    // Our input function is always equivalent to returning 42, right?
     let result = quote! {
         pub struct #decodeable_name {
-            #(pub #field_names: u32),*
+            #(#fields),*
         }
 
         // impl #decodeable_name {
@@ -54,13 +56,114 @@ pub fn frame(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 }
 
 #[derive(Debug)]
-struct Field {
-    field_name: proc_macro2::Ident,
-    byte_range: std::ops::Range<u64>,
-    typ: proc_macro2::Ident,
+enum Bits {
+    Full,
+    Partial(syn::ExprRange)
 }
 
-fn get_struct_identifier(mut input: IntoIter) -> (proc_macro2::Ident, IntoIter) {
+#[derive(Debug)]
+struct Struct {
+    pub fields: Vec<Field>,
+}
+
+impl Parse for Struct {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(Self {
+            fields: input.parse_terminated::<Field, syn::Token![,]>(Field::parse)?.into_iter().collect()
+        })
+    }
+}
+
+#[derive(Debug)]
+struct Dependency {
+    byte_range: syn::ExprRange,
+    bit_range: Bits,
+    typ: Box<syn::Type>,
+}
+
+impl Parse for Dependency {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(Self {
+            byte_range: parse_range(input)?,
+            bit_range: {
+                if input.peek(syn::token::Bracket) {
+                    Bits::Partial(parse_range(input)?)
+                } else {
+                    Bits::Full
+                }
+            },
+            typ: {
+                input.parse::<syn::Token![:]>()?;
+                input.parse()?
+            },
+        })
+    }
+}
+
+#[derive(Debug)]
+struct Field {
+    name: syn::Ident,
+    byte_range: syn::ExprRange,
+    bit_range: Bits,
+    typ: Box<syn::Type>,
+    depends_on: Option<Dependency>
+}
+
+impl Parse for Field {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(Field {
+            name: input.parse()?,
+            byte_range: parse_range(input)?,
+            bit_range: {
+                if input.peek(syn::token::Bracket) {
+                    Bits::Partial(parse_range(input)?)
+                } else {
+                    Bits::Full
+                }
+            },
+            typ: {
+                input.parse::<syn::Token![:]>()?;
+                input.parse()?
+            },
+            depends_on: {
+                if input.peek(syn::Token![->]) {
+                    input.parse::<syn::Token![->]>()?;
+                    Some(input.parse()?)
+                } else {
+                    None
+                }
+            }
+        })
+    }
+}
+
+fn parse_range(input: ParseStream) -> syn::Result<syn::ExprRange> {
+    let content;
+    syn::bracketed!(content in input);
+    match content.parse()? {
+        syn::Expr::Range(range_expr) => Ok(range_expr),
+        syn::Expr::Lit(lit_expr) => {
+            let exp = Box::new(syn::Expr::Lit(lit_expr));
+            Ok(syn::ExprRange {
+                attrs: vec![],
+                from: Some(exp.clone()),
+                limits: syn::RangeLimits::HalfOpen(syn::Token![..](proc_macro2::Span::call_site())),
+                to: Some(Box::new(syn::Expr::Binary(syn::ExprBinary {
+                    attrs: vec![],
+                    left: exp,
+                    op: syn::BinOp::Add(syn::Token![+](proc_macro2::Span::call_site())),
+                    right: Box::new(syn::Expr::Lit(syn::ExprLit {
+                        attrs: vec![],
+                        lit: syn::Lit::Int(syn::LitInt::new(1, syn::IntSuffix::I64, proc_macro2::Span::call_site()))
+                    }))
+                })))
+            })
+        },
+        _ => panic!("Expected range.")
+    }
+}
+
+fn get_struct_identifier(mut input: IntoIter) -> (proc_macro2::Ident, TokenStream) {
     match input.next() {
         Some(Ident(ident)) => {
             let ident = syn::Ident::new(&ident.to_string(), ident.span());
@@ -69,7 +172,7 @@ fn get_struct_identifier(mut input: IntoIter) -> (proc_macro2::Ident, IntoIter) 
                 Some(Group(group)) => {
                     // Match curly braces of group
                     match group.delimiter() {
-                        proc_macro2::Delimiter::Brace => (ident, group.stream().into_iter()),
+                        proc_macro2::Delimiter::Brace => (ident, group.stream()),
                         _ => panic!("Expected brace.")
                     }
                 },
@@ -77,141 +180,6 @@ fn get_struct_identifier(mut input: IntoIter) -> (proc_macro2::Ident, IntoIter) 
             }
         },
         _ => panic!("Expected a struct identifier.")
-    }
-}
-
-fn get_field(input: IntoIter) -> (Field, IntoIter) {
-    let (field_name, input) = get_field_identifier(input);
-
-    let (byte_range, mut input, _) = get_byte_range(input);
-
-    input = expect_colon(input);
-
-    let (typ, input) = get_type(input);
-
-    (Field {
-        field_name,
-        byte_range,
-        typ
-    }, input)
-}
-
-fn get_field_identifier(mut input: IntoIter) -> (proc_macro2::Ident, IntoIter) {
-    match input.next() {
-        Some(Ident(ident)) => {
-            (syn::Ident::new(&ident.to_string(), ident.span()), input)
-        },
-        _ => panic!("Expected a field identifier.")
-    }
-}
-
-fn get_byte_range(mut input: IntoIter) -> (std::ops::Range<u64>, IntoIter, IntoIter) {
-    // Match byterange group
-    match input.next() {
-        Some(Group(group)) => {
-            // Match parenthesis of group
-            match group.delimiter() {
-                proc_macro2::Delimiter::Bracket => {
-                    let tokens = group.stream().into_iter();
-                    let tuple = get_range(tokens);
-                    (tuple.0, input, tuple.1)
-                },
-                _ => panic!("Expected brace.")
-            }
-        },
-        _ => panic!("Bad token.")
-    }
-}
-
-fn get_number(mut input: IntoIter) -> (Option<u64>, IntoIter) {
-    match input.next() {
-        Some(Literal(literal)) => {
-            (Some(literal.to_string().parse().unwrap()), input)
-        },
-        _ => (None, input)
-    }
-}
-
-fn get_range_start(input: IntoIter) -> (u64, IntoIter) {
-    if let (Some(number), input) = get_number(input) {
-        (number, input)
-    } else {
-        panic!("Expected the end of a byterange.")
-    }
-}
-
-fn expect_range_delimiter_or_end(mut input: IntoIter) -> (bool, IntoIter) {
-    // Match first value of bitrange.
-    let mut point = false;
-    match input.next() {
-        Some(Punct(literal)) => {
-            if literal.as_char() == '.' {
-                point = true;
-            }
-        },
-        _ => {
-            if input.next().is_some() {
-                panic!("Expected no more characters.");
-            }
-        }
-    }
-    if point {
-        match input.next() {
-            Some(Punct(literal)) => {
-                if literal.as_char() != '.' {
-                    point = false;
-                }
-            },
-            _ => {
-                point = false;
-            }
-        }
-    }
-    if point {
-        (true, input)
-    } else {
-        (false, input)
-    }
-}
-
-fn expect_colon(mut input: IntoIter) -> IntoIter {
-    match input.next() {
-        Some(Punct(literal)) => {
-            if literal.as_char() == ':' {
-                return input;
-            }
-        },
-        _ => ()
-    };
-    panic!(format!("Expected ':'."))
-}
-
-fn get_range_end(input: IntoIter) -> (u64, IntoIter) {
-    if let (Some(number), input) = get_number(input) {
-        (number, input)
-    } else {
-        panic!("Expected the end of a byterange.")
-    }
-}
-
-fn get_range(input: IntoIter) -> (std::ops::Range<u64>, IntoIter) {
-    let (byte_range_start, input) = get_range_start(input);
-
-    let (has_end, input) = expect_range_delimiter_or_end(input);
-    if has_end {
-        let (byte_range_end, input) = get_range_end(input);
-        (byte_range_start..byte_range_end, input)
-    } else {
-        (byte_range_start..byte_range_start, input)
-    }
-}
-
-fn get_type(mut input: IntoIter) -> (proc_macro2::Ident, IntoIter) {
-    match input.next() {
-        Some(Ident(ident)) => {
-            (syn::Ident::new(&ident.to_string(), ident.span()), input)
-        },
-        _ => panic!("Expected a type identifier.")
     }
 }
 
