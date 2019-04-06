@@ -1,4 +1,24 @@
-use proc_exp::frame;
+# proc-exp
+
+## Motivation
+
+Especially in the embedded world, there is a lot of low level bit & byte based protocols such as 802.15.4, Zigbee, BLE, etc.
+Those protocols have a huge scope with hundreds of different structures. Those structures can hold a lot of fields which can be fixed or dynamically sized, can be optional or mandatory, can be a plain number or an enum and so on.
+Writing serializers and deserializers for those structures including validation is very generic and highly time consuming. Even worse, implementing this manually is very error prone.
+
+This crate aims to provide a proc_macro which turns a simple DSL description of a protocol structure into a struct with all the parser machinery implemented.
+The parsing is guaranteed to do all necessary checks and only return valid structures.
+
+## State of the crate
+
+Parsing of the basic DSL and struct generation works.
+The API to serialize and deserialize the structs is to be defined.
+
+## DSL
+
+The following field types are currently possible to resolve:
+
+```rust
 
 frame! {
     Frame {
@@ -22,6 +42,9 @@ frame! {
     }
 }
 
-fn main() {
-    println!("Hello, world!");
-}
+```
+
+## Contribute
+
+The project has not really progressed yet. I am very happy with every API suggestion.
+Just open an issue or ping on IRC :)
